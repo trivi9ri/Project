@@ -25,10 +25,10 @@ sys.path.append(tmp_dir)
 from lastvalue import *
 
 
-CONSUMER_KEY ='euJVsZtssnSdgdXKm4jaIAbK5'
-CONSUMER_SECRET = 'LG30eLwdNlKOS3WyImdOFUf2imvRldo5a7xPYI94qQiv2UGwPg'
-ACCESS_KEY = '1805474768-SbWh1Blp2GqRelRsu3CeQ0i8753L2mUXKGBFyuc'
-ACCESS_SECRET = 'RplRY27OLNRCKcjJ1YjSOEHsUfmShrZYURG1SwWk9IR7Y'
+CONSUMER_KEY =''
+CONSUMER_SECRET = ''
+ACCESS_KEY = ''
+ACCESS_SECRET = ''
 
 URL_SENTIMENT140 = "http://www.sentiment140.com/api/bulkClassifyJson"
 Politician = "samsung"
