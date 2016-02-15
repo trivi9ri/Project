@@ -1,0 +1,955 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# Author : https://github.com/hlimbehappy
+#        : https://github.com/jeonghoonkang
+
+import time
+import datetime
+import os
+import sys
+import requests
+import json
+import argparse
+import calendar
+import urllib2
+from operator import itemgetter, attrgetter
+import mdsid_info # mdsid information
+
+url = "http://125.7.128.53:4242/api/put"
+
+def timeList (in_st, in_et, in_min):
+
+	t_list = []
+
+	tc = in_min / 60
+	lc = (int(in_et) - int(in_st)) * tc
+	
+#	print "lc = %s" %lc
+
+	for i in range(lc+1):
+		if i < 10:
+			in_time = in_st[0:8] + '0' + str(i)
+		else:
+			in_time = in_st[0:8] + str(i)
+		
+#		print "in_time = %s" %in_time	
+		t_list.append(int(timeTOunixtime(in_time)))
+
+	return t_list
+
+
+def dataParser(s):
+	s = s.split("{")
+	#print data
+	i = 0
+	j = len(s)
+
+	if j > 2:
+		s = s[3].replace("}","")
+		s = s.replace("]","")
+	else:
+		return '0:0,0:0'
+	return s
+
+# DB에서 정보를 읽어온다.
+
+def readTSDB(in_st, in_et, in_mdsid):
+
+	packetlist = [] # split :
+	packetlist_filter = [] # integer
+
+
+	#YYYY/MM/DD-HH:00:00
+	starttime = "%s/%s/%s-%s:00:00" %(in_st[0:4], in_st[4:6], in_st[6:8], in_st[8:10])
+	endtime = "%s/%s/%s-%s:00:00" %(in_et[0:4], in_et[4:6], in_et[6:8], in_et[8:10])
+
+	url_tsdb = "http://125.7.128.53:4242/api/query?start=" + starttime + "&end=" + endtime + "&m=sum:rc001.EE.MDS_ID_" + in_mdsid + "&o=&yrange=%5B0:%5D&wxh=1008x365"
+
+	tsdbdata = urllib2.urlopen(url_tsdb)
+
+	read_query = tsdbdata.read()
+	packets = dataParser(read_query)
+	packet = packets.split(',')
+
+	for k in range(len(packet)):
+        	packetlist.append(packet[k].split(":"))
+        	tmp = packetlist[k][0]
+#		print "(readTSDB) mdsid: %s, %s, tmp: %s, len(tmp): %s" %(in_mdsid, k, tmp, len(tmp))
+
+		
+		if len(tmp) > 0:
+        		packetlist_filter.append([int(tmp[1:len(tmp)-1]), float(packetlist[k][1])])
+		
+#		packetlist_filter.append([int(tmp[1:len(tmp)-1]), float(packetlist[k][1])])
+
+
+	return packetlist_filter
+
+
+def normCAL(in_list):
+
+	val_list = []
+	norm_list = []
+
+	for i in range(len(in_list)):
+		val_list.append(in_list[i][1])
+
+	minval = min(val_list)
+	maxval = max(val_list)
+
+	for i in range(len(in_list)):
+		norm_val = (in_list[i][1] - minval) / (maxval - minval)
+		norm_list.append([in_list[i][0], norm_val])
+
+	return norm_list
+
+
+def postData(in_vallist, in_taglist):
+
+	for i in range(len(in_vallist)):
+
+		data = {
+			"metric" : "tmp.rwTSDB.ee.MDS_ID_" + in_taglist[0],
+			"timestamp" : in_vallist[i][0],
+			"value" : in_vallist[i][1],
+			"tags" : {
+				"MDS_ID" : in_taglist[0],
+				"DATA_DATE" : in_taglist[1]
+                        	}	
+                	}
+
+		ret = requests.post(url, data=json.dumps(data))
+
+# change string date to integer
+# 매개변수로 받은 날짜의 년, 월, 일, 시간을 각각 반환하는 함수
+def dateInt(in_time, mdh):
+        # year
+        if mdh == 'y':
+                re_mdh = int(in_time[0:4])
+
+	# month
+	if mdh == 'm':
+		if in_time[4] == '0':
+                	re_mdh = int(in_time[5])
+        	else:
+                	re_mdh = int(in_time[4:6])
+	# day
+	elif mdh == 'd':
+		if in_time[6] == '0':
+                	re_mdh = int(in_time[7])
+        	else:
+                	re_mdh = int(in_time[6:8])
+	# hour
+	elif mdh == 'h':
+        	if in_time[8] == '0':
+                	re_mdh = int(in_time[9])
+        	else:
+                	re_mdh = int(in_time[8:10])
+
+	return re_mdh
+
+# fill "0" for one digit
+def twodigitZero(in_num):
+	if in_num < 10:
+		re_num = '0' + str(in_num)
+	else:
+		re_num = str(in_num)
+
+	return re_num
+
+# calculate next year, month, day
+# 매개변수로 받은 날짜의 다음 년, 월, 일을 구하는 함수
+def nextDate(in_time, in_mdh):
+        # next year
+        if in_mdh == 'y':
+		int_year = dateInt(in_time, 'y')
+		next_year = int_year + 1
+
+                re_mdh = str(next_year) + '010000' # next year/01/01/00
+
+        # next month
+        if in_mdh == 'm':
+        	int_month = dateInt(in_time, 'm')
+        	next_month = twodigitZero(int_month + 1)
+
+        	re_mdh = in_time[0:4] + next_month + '00' + in_time[8:10] # next month/01/01
+
+        # next day
+        elif in_mdh == 'd':
+                int_day = dateInt(in_time, 'd')
+                next_day = twodigitZero(int_day + 1)
+
+                re_mdh = in_time[0:6] + next_day + in_time[8:10]
+
+        return re_mdh
+
+# calculate date list automatically
+# 시작날과 마지막 날을 매개변수로 받아서 기간 동안의 날짜들을 datelist에 넣고 반환한다.
+def calDate(sttime, ettime):
+
+	w_sttime = sttime
+	w_ettime = ettime
+
+#시간을 제외하고 시작 날짜만 tmp_w_sttime에 넣는다.
+
+	tmp_w_sttime = w_sttime[0:8]
+
+	first_loop = 0
+
+	re_datelist = []
+
+	print "(calDate) DEBUG: sttime: %s, ettime: %s" %(sttime, ettime)
+
+	while 1:
+
+		if first_loop > 0:
+			if w_ettime == ettime:
+				print "(calDate) while loop finished ..."
+				break
+			else:				
+                        	w_sttime = nextDate(w_sttime, 'd')
+                        	tmp_w_sttime = w_sttime[0:8] #ymd
+
+		w_ettime = tmp_w_sttime + '23'
+		
+		if w_ettime == ettime:
+			first_loop = 1
+			re_datelist.append([w_sttime, w_ettime])
+			break
+		
+		else: # start time != end time
+			if dateInt(ettime, 'y') == dateInt(w_sttime, 'y'): # same year
+				if dateInt(ettime, 'm') > dateInt(w_sttime, 'm'): # different month
+					
+				# check the last day of start month
+					w_st_calr = calendar.monthrange(int(w_sttime[0:4]), dateInt(w_sttime, 'm'))
+
+					if dateInt(w_sttime, 'd') == w_st_calr[1]: # current day == the last day of stday
+						# next month
+						re_datelist.append([w_sttime, tmp_w_sttime+'23'])
+						w_sttime = nextDate(w_sttime, 'm')
+						first_loop = 1
+						continue			
+								
+			else: # different year
+
+				tmp_w_sttime = w_sttime[0:4] # year
+				
+				w_st_calr = calendar.monthrange(int(w_sttime[0:4]), dateInt(w_sttime, 'm'))
+
+				if dateInt(w_sttime, 'd') == w_st_calr[1]: # current day == the last day of stday
+					re_datelist.append([w_sttime, w_ettime])
+
+					if dateInt(w_sttime, 'm') == 12: # 12 month
+						# next year
+						w_sttime = nextDate(w_sttime, 'y')
+						tmp_w_sttime = w_sttime[0:8]
+						first_loop = 1
+						continue
+						
+					else:
+                                        	# next month
+                                        	w_sttime = nextDate(w_sttime, 'm')
+                                        	tmp_w_sttime = w_sttime[0:8]
+                                        	first_loop = 1
+                                        	continue
+					
+                	first_loop = 1
+
+		re_datelist.append([w_sttime, w_ettime])
+
+	return re_datelist
+
+
+# convert time to UNIX time
+def timeTOunixtime (rlt):
+	#YYY [0:4]), MM [4:6]), DD 6:8], HH [8:10]
+	stime = "%s/%s/%s" %(rlt[6:8], rlt[4:6], rlt[0:4])        
+        h = rlt[8:10]
+
+        #unixtime need to have 1 sec unit scale
+        dechour = int(h)*60*60
+        unixday = time.mktime(datetime.datetime.strptime(stime, "%d/%m/%Y").timetuple())
+        unixtime = unixday + dechour
+	return unixtime
+
+
+# TSDB
+
+# 해당 데이터를 db에 넣는다
+def postData(in_valuelist, in_taglist):
+
+	yyyymmdd = '20160214'
+	print "(postData) metric date: %s" %yyyymmdd
+
+        for i in range(len(in_valuelist)):
+
+		hr = twodigitZero(i) # 00 ~ 23
+
+		uxtime = timeTOunixtime(yyyymmdd+hr) # unix time
+
+                data = {
+                        "metric" : in_taglist[0],
+                        "timestamp" : uxtime,
+                        "value" : in_valuelist[i],
+                        "tags" : {
+                                "CLASS_NAME" : in_taglist[1],
+                                "START" : in_taglist[2],
+				"END" : in_taglist[3],
+                                "PARTS" : in_taglist[4]
+                                }
+                        }
+
+                ret = requests.post(url, data=json.dumps(data))                
+                   
+
+# calculate average per MDSID
+def calAVG(in_retTSDB):
+
+#	print"(calAVG) in_retTSDB: %s" %in_retTSDB
+
+	lc = len(in_retTSDB)
+	base = 24
+
+	avglist = []
+
+#	print "(calAVG) in_retTSDB: %s" %in_retTSDB
+
+	for i in range(base):
+		tmp_sum = 0.0
+		for j in range(lc):
+#			print "(calAVG) i: %s, j: %s, in_retTSDB[j][i][1]: %s" %(i, j, in_retTSDB[j][i][1])
+			tmp_sum = tmp_sum + in_retTSDB[j][i][1]
+		avglist.append(tmp_sum/lc) # average
+
+	return avglist
+
+
+# calculate maximum
+# 매개변수로 받아온 데이터들 중 가장 큰 값을 반환하는 함수이다.
+def calMAX(in_tsdb, in_max):
+
+	lc = len(in_tsdb)
+	val_list = []
+
+	for i in range(lc):
+		val_list.append(in_tsdb[i][1])
+
+	val_list.append(in_max) # add preivious maximum value
+
+	ret_mx = max(val_list)
+
+#	print "val_list: %s, len(val_list): %s, max.value: %s" %(val_list, len(val_list), ret_mx)
+
+	return ret_mx
+
+
+# caluculate normalization
+# nomalization을 구한다.
+def calNORM(in_tsdb, in_mx):	
+	
+        lc = len(in_tsdb)
+        base = 24
+
+	# initializae [[,],[,]...23[,]]
+	normlist = [[[[] for k in range(2)] for k in range(base)] for k in range(lc)]   
+
+        for i in range(lc):
+                for j in range(base):
+			if in_mx == 0:
+				normval = 0
+			else:
+                        	normval = in_tsdb[i][j][1] / in_mx # normalization
+			normlist[i][j][0] = in_tsdb[i][j][0]
+			normlist[i][j][1] = normval 
+
+#	print "normalization list: %s, len(normlist): %s" %(normlist, len(normlist)) 
+        return normlist
+
+# calculate class average
+def calClAVG(in_list):
+
+#	print "(calClAVG) in_list: %s" %in_list
+	
+        lc = len(in_list)
+        base = 24
+	
+	cavglist = []
+
+        for i in range(base):
+                tmp_sum = 0.0
+                for j in range(lc):
+#                       print "i: %s, j: %s, in_retTSDB[j][i][1]: %s" %(i, j, in_retTSDB[j][i][1])
+                        tmp_sum = tmp_sum + in_list[j][i]
+		if lc == 0:
+                        cavglist.append(0.0) # average
+		else:
+                	cavglist.append(tmp_sum/lc) # average
+
+        return cavglist
+
+# calculate average per mdsid, per class
+def calAVGS(in_list, in_len_mdsid):
+
+#	print "(calAVGS) in_list: %s" %in_list
+
+	lc = in_len_mdsid # per mdsid
+	lcs = len(in_list[0])
+
+#	print "(calAVGS) lc: %s / lcs: %s" %(lc, lcs)
+	
+        base = 24
+
+#        avglist = [] # average per mdsid
+	avg_idlist = []
+
+#        print "(calAVGS) in_list[0][0][0]: %s \n in_list[0][1][0]: %s \n in_list[1][0][0]: %s \n in_list[1][1][0]: %s" %(in_list[0][0][0], in_list[0][1][0], in_list[1][0][0], in_list[1][1][0])
+
+	for i in range(lc):	
+		avglist = []
+        	for j in range(base): # 24
+                	tmp_sum = 0.0
+                	for k in range(lcs): # 2
+#                        	print "(calAVGS)in_list[i][k][0][j][1]: %s" %(in_list[i][k][0][j][1])
+                        	tmp_sum = tmp_sum + in_list[i][k][0][j][1]
+
+#			print "(calAVGS) i: %s, j: %s, tmp_sum: %s" %(i, j, tmp_sum)
+
+			if lcs == 0: # 0 case
+#				print "(calAVGS) if lcs == 0"
+				avglist.append(0.0)
+			else:
+#				print "(calAVGS) if lcs != 0"
+                		avglist.append(tmp_sum/lcs) # average
+
+#		print "(calAVGS) i: %s, j: %s, avglist: %s" %(i, j, avglist)
+
+		avg_idlist.append(avglist)
+#		print "(calAVGS) avg_idlist: %s, len(avg_idlist): %s" %(avg_idlist, len(avg_idlist))
+
+	return avg_idlist
+
+# calculate capacity utilization
+def calCU(in_list):
+
+#	print "in_list: %s" %in_list
+
+	lc = len(in_list)
+
+	cu = sum(in_list) / lc
+
+	re_culist = []
+
+	for i in range(lc):
+		re_culist.append(cu)
+
+	return re_culist
+
+# fill missing data
+# 데이터들 중 이상한 값을 검색하여 바꾸어 넣는 함수이다.
+def fillData(in_uxtime, in_tsdb):
+
+	lc = len(in_uxtime)
+	lcdb = len(in_tsdb)-1
+
+	re_filledlist = []
+
+	in_tsdb_sorted = sorted(in_tsdb, key=itemgetter(0))
+
+#	print "(fillData) unix time: %s, tsdb_sorted: %s" %(in_uxtime, in_tsdb_sorted)
+
+	# if in_tsdb_sorted empty
+	if len(in_tsdb_sorted) == 0:
+		for j in range(lc):
+			re_filledlist.append([in_uxtime[j],0]) 
+		return re_filledlist
+
+	ix = 0 # tsdb index
+
+	for i in range(lc): # number of unix time
+
+#		print "(fillData) i: %s, ix: %s" %(i, ix)
+# 해당 날짜의 데이터가 0보다 크다면 정상적인 값으로 반환될 list에 추가하고, 
+# 아니라면 (음수 값) 값을 0으로 하여 반환될 list에 넣는다.
+
+		if in_uxtime[i] == in_tsdb_sorted[ix][0]:
+			if in_tsdb_sorted[ix][1] >= 0:
+				re_filledlist.append(in_tsdb_sorted[ix])
+			else:
+				re_filledlist.append([in_uxtime[i], 0])
+
+			if ix < lcdb:
+				ix += 1
+		else:
+			re_filledlist.append([in_uxtime[i], 0])
+
+#		print "(fillData) i: %s, lc: %s, lcdb: %s, re_filledlist: %s" %(i, lc, lcdb, re_filledlist)
+
+#	print "(fillData) re_filledlist: %s" %re_filledlist
+	return re_filledlist	 
+
+# check empty
+# 날짜와 해당 마트 ID를 매개변수로 받아서 날짜마다 비어있는 데이터가 있는지 확인한다.
+def checkTSDB(in_st, in_et, in_mdsid):
+
+        #YYYY/MM/DD-HH:00:00
+        starttime = "%s/%s/%s-%s:00:00" %(in_st[0:4], in_st[4:6], in_st[6:8], in_st[8:10])
+        endtime = "%s/%s/%s-%s:00:00" %(in_et[0:4], in_et[4:6], in_et[6:8], in_et[8:10])
+
+        url_tsdb = "http://125.7.128.53:4242/api/query?start=" + starttime + "&end=" + endtime + "&m=sum:rc001.EE.MDS_ID_" + in_mdsid + "&o=&yrange=%5B0:%5D&wxh=1008x365"
+
+##+        tsdbdata = urllib2.urlopen(url_tsdb)
+
+	
+	try:
+		tsdbdata = urllib2.urlopen(url_tsdb)
+	except urllib2.HTTPError as e:
+#    		print '(checkTSDB) HTTP.Error code: %s / The server couldn\'t fulfill the request.' %e.code
+		empty_flag = 1
+		return empty_flag
+	except urllib2.URLError as e:
+#    		print '(checkTSDB) URL.Reason: %s / We failed to reach a server.' %e.reason
+		empty_flag = 1
+		return empty_flag
+
+        read_query = tsdbdata.read()
+#	print "(checkTSDB) mdsid: %s, in_st: %s, in_et: %s, read_query: %s" %(in_mdsid, in_st, in_et, read_query)
+
+        if (read_query == '[]'): # check valid matric
+		empty_flag = 1
+	else:
+		empty_flag = 0
+#	데이터가 비어있다면 1을 반환, 아니라면 0을 반환한다.
+        return empty_flag
+
+
+def verifyMDSID(in_datelist, in_mdsid_list):
+
+	retList = []
+
+        for i in range(len(in_mdsid_list)): # number of mdsid list
+#                print "i: %s, mdsid: %s" %(i, in_mdsid_list[i]) 
+                for j in range(len(in_datelist)): # number of date
+                        #retTSDB [[1st day 0..24][2nd day 0..24]], starttiem, endtime, mdsid
+			#in_datelist의n번째 행의 0열에는 시작날짜가 1열에는 마지막 날짜가 들어가는데 	
+			#이는 각 날짜의 0시와 23시이다.
+                        empty_tsdb = checkTSDB(in_datelist[j][0], in_datelist[j][1], in_mdsid_list[i])
+#                        print "tmp_tsdb: %s" %tmp_tsdb
+
+# 만약 해당 마트 ID에 빈 데이터가 있다면 break
+			if empty_tsdb == 1:
+#				print "empty: mdsid: %s" %in_mdsid_list[i]
+				break
+# 만약 빈데이터가 없다면 해당 마트 id를 반환할 list에 추가한다.
+		if empty_tsdb != 1: # tsdb is not empty
+			retList.append(in_mdsid_list[i])
+
+#	print "(verifyMDSID) retList: %s / len(retList): %s" %(retList, len(retList))
+	return retList
+
+def calCALENDAR(in_sttime, in_entime):
+
+        in_st_year = dateInt(in_sttime, 'y')
+        in_st_month = dateInt(in_sttime, 'm')
+#        in_st_day = dateInt(in_sttime, 'd')
+
+        in_en_year = dateInt(in_entime, 'y')
+        in_en_month = dateInt(in_entime, 'm')
+#        in_en_day = dateInt(in_entime, 'd')
+
+        cal_ym = []
+
+        in_year = in_st_year
+        in_month = in_st_month
+
+        while (1):
+
+                if in_year == in_en_year: # same year
+                        if in_month == in_en_month:
+                                cal_ym.append([in_year, in_month])
+                                break
+                        else:
+                                cal_ym.append([in_year, in_month])
+                                in_month += 1
+                else: # different year
+                        if in_month == 12:
+                                cal_ym.append([in_year, in_month])
+                                in_year += 1
+                                in_month = 1
+                        else:
+                                cal_ym.append([in_year, in_month])
+                                in_month += 1
+
+	return cal_ym
+
+# calculate holiday
+# 해당 마트의 휴무일 리스트를 반환하는 함수
+def calHOLIDAY(in_sttime, in_entime, in_normlist_save, in_mdsid_info):
+
+	# mdsid_info.mdsid_mart_info : [mdsid, sic, class, [holiday, customer number, customer name]]
+
+#       print "[calHOLIDAY] date: %s" %in_sttime
+
+	ret_non_working_list = []
+
+        cal_ym = calCALENDAR(in_sttime, in_entime)
+
+	c = [[] for k in range(len(cal_ym))]
+
+#	print "(calHOLIDAY) calculation year month list: %s" %cal_ym
+	
+        # Compute the dates for each week that overlaps the month
+        # monday(0) ... sunday(6)
+	for cy in range(len(cal_ym)):
+        	c[cy] = calendar.monthcalendar(cal_ym[cy][0], cal_ym[cy][1]) # year, month
+
+#	print "(calHOLIDAY) c: %s" %c
+
+        ret_holiday_list = []
+	ret_working_list = []
+
+	# [[unixtime, value]...[unixtime, value]]
+#	print "(calHOLIDAY) in_normlist_save[0][0][0]=%s, mdsid_info[0][0]=%s" %(in_normlist_save[0][0][0], mdsid_info.mdsid_mart_info[0][0])
+
+	ix = 0
+
+#	print "(calHOLIDAY) in_normlist_save: %s" %in_normlist_save
+        # [[unixtime, value]...[unixtime, value]]
+#        print "(calHOLIDAY) in_normlist_save[0[0][3]: %s, len: %s" %(in_normlist_save[0][0][3], len(in_normlist_save[0][0][3]))
+#	print "(calHOLIDAY) in_normlist_save[0][0][1][0:8]: %s" %in_normlist_save[0][0][1][0:8] # year, month, day
+
+	for i in range(len(in_normlist_save)): # mdsid
+#		print "(calHOLIDAY) in_normlist_save[i]: %s" %in_normlist_save[i]
+		while 1: # valid mdsid check
+#			print "(calHOLIDAY) in_normlist_save[%s][0][0](=%s), mdsid_info[%s][0](=%s)" %(i, in_normlist_save[i][0][0], ix, mdsid_info.mdsid_mart_info[ix][0])
+
+			# same mdsid
+			if in_normlist_save[i][0][0] == in_mdsid_info[ix][0]:
+#				print "(calHOLIDAY) in_normlist_save[%s][0][0](=%s) == mdsid_info[%s][0](=%s)" %(i, in_normlist_save[i][0][0], ix, mdsid_info.mdsid_mart_info[ix][0])
+				
+                		in_info = in_mdsid_info[ix][3][0] # holiday
+#                		print "(calHOLIDAY) in_info: %s" %in_info
+
+       				holiday_list = [[] for m in range(len(cal_ym))]
+
+				# holiday list
+				for k in range(len(cal_ym)): # month	
+                			for j in range(len(in_info)): #holiday [[week, day],[week, day]]
+						mart_week = c[k][in_info[j][0]] # week
+                        			mart_holiday = mart_week[in_info[j][1]]
+						# year + month + day
+						holiday_list[k].append(str(cal_ym[k][0])+twodigitZero(cal_ym[k][1])+twodigitZero(mart_holiday))
+#						print "(calHOLIDAY) k: %s, j: %s, mart week: %s, mart holiday: %s" %(k, j, mart_week, mart_holiday)
+				# print holiday list
+#				print "(calHOLIDAY) holiday list: %s" %holiday_list
+				break
+			else:
+				ix += 1
+
+		ixhlm = 0
+		ixhld = 0
+
+                for m in range(len(in_normlist_save[i])): # length of date
+#			print "(calHOLYDAY) m: %s, len(in_normlist_save[i]): %s" %(m, len(in_normlist_save[i]))
+#			print "(calHOLYDAY) in_normlist_save[i][m][1][0:8]: %s, holiday_list[ixhlm][ixhld]: %s" %(in_normlist_save[i][m][1][0:8], holiday_list[ixhlm][ixhld])
+#                        print "(calHOLYDAY) ixhlm: %s, ixhld: %s" %(ixhlm, ixhld)
+
+                        # until same holiday year, month, day
+			while 1:
+				if (ixhld < len(cal_ym[0])) and (ixhlm < len(cal_ym)):
+                        		if in_normlist_save[i][m][1][0:8] > holiday_list[ixhlm][ixhld]: # greater than holiday list
+                                		if ixhld < (len(cal_ym[0])-1):
+                                        		ixhld += 1
+                                		elif ixhlm < (len(cal_ym)-1):
+                                        		ixhlm += 1
+                                        		ixhld = 0
+						else:
+							break
+					else:
+						break
+				else:
+					break
+                                
+#			print "(calHOLIDAY) holiday_list: %s" %holiday_list[ixhlm][ixhld]
+
+                        if in_normlist_save[i][m][1][0:8] == holiday_list[ixhlm][ixhld]: # same (year, month, day
+                                ret_holiday_list.append(in_normlist_save[i][m])
+#				ret_holiday_list[ixh]=in_normlist_save[i][m]
+#				ixh += ixh # index holiday list
+#				print "(calHOLYDAY) in_normlist_save[i][m]: %s \n ret_holiday_list: %s" %(in_normlist_save[i][m], ret_holiday_list)
+
+                             	if ixhld < (len(cal_ym[0])-1):
+                                	ixhld += 1
+                               	elif ixhlm < (len(cal_ym)-1):
+                                       	ixhlm += 1
+                                       	ixhld = 0
+
+                        else: # different (year, month, day)
+                                ret_working_list.append(in_normlist_save[i][m])
+#				print "ret_working_list: %s" %ret_working_list
+
+#	print "(calHOLIDAY) ret_holiday_list: %s" %ret_holiday_list
+#	print "(calHOLIDAY) ret_working_list: %s" %ret_working_list
+        ret_non_working_list = [ret_holiday_list] + [ret_working_list]
+#	print "(calHOLYDAY) ret_non_working_list: %s" %ret_non_working_list
+
+	return ret_non_working_list
+#        return mart_holiday_list
+
+def saveNORMLIST(in_mdsid_list, in_datelist, in_normlist): 
+
+	lc = len(in_normlist)
+	
+	normlist_save = []
+
+#	print "(saveNORMLIST) in_normlist: %s" %in_normlist
+
+	for i in range(lc): # normalizaion
+		normlist_save.append([in_mdsid_list, in_datelist[i][0], in_datelist[i][1], in_normlist[i]])
+
+#	print "(saveNORMLIST): normlist_save: %s" %normlist_save
+
+	return normlist_save
+
+def arrangeList(in_list, in_len_mdsid):
+
+	lc = len(in_list)
+
+	ix = lc / in_len_mdsid
+
+	# [[], []]
+        retList = [[] for k in range(in_len_mdsid)]
+#	print "(arrangeList) len(retList): %s" %len(retList[0])
+
+	for i in range(lc):
+		#retList[0], retList[1] .. MDSID
+		retList[i/ix].append(in_list[i][3:len(in_list[i])])
+
+#	print "(arrangeList) retList: %s" %retList	
+#	print "(arrnageList) retList[0]: %s, retList[1]: %s" %(retList[0], retList[1])
+	return retList
+
+#해당 마트가 info_factory 안에 있는지 검사하고 있다면 반환
+def findVOLUME(in_mdsid_list, in_mdsid_info_factory):
+
+	lim = len(in_mdsid_info_factory)
+
+	for i in range(lim):
+		if in_mdsid_list == in_mdsid_info_factory[i][0]:
+			return i
+		else:
+			continue
+
+
+# main function
+if __name__ == "__main__":
+
+        sttime = '2015112000'
+#	sttime = '2015122500'
+#	entime = '2015122623'
+	entime = '2016021423'
+
+	datelist = []
+	retTSDB = []	
+	avglist = []
+	c_vglist = []
+	culist = []
+
+	normlist = []
+	tmp_tsdb = []
+	tmp_tsdb_fill = []
+	retTL = []
+
+	mdsid_list_full = []
+
+	datelist = calDate(sttime, entime)
+
+#	print "date list: %s, len(datelist): %s" %(datelist, len(datelist))
+
+	# emart
+	"""	
+	for i in range(len(mdsid_info.mdsid_mart_info)):
+		mdsid_list_full.append(mdsid_info.mdsid_mart_info[i][0])
+	"""
+
+        # factory - LED
+        #['00-50151143003408', 'MOTOR', 'factory', [[[0, 5], [0, 6]], '754720150002EE00-E1', '1501_hyosung(ulsan_factory)', 55]]]
+	"""+
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+                if mdsid_info.mdsid_factory_info[i][1] == 'LED':
+                        mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	"""
+
+        # factory - MOTOR
+	#['00-50151143003408', 'MOTOR', 'factory', [[[0, 5], [0, 6]], '754720150002EE00-E1', '1501_hyosung(ulsan_factory)', 55]]]
+	"""+		
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+		if mdsid_info.mdsid_factory_info[i][1] == 'MOTOR':
+                	mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	"""
+
+	# factory - INVERTER (compressor, blower, fan, pump)	
+	"""
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+                if mdsid_info.mdsid_factory_info[i][1] == 'INVERTER':
+                        mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	"""
+
+        # factory - INVERTER (compressor)
+	"""
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+                if (mdsid_info.mdsid_factory_info[i][1] == 'INVERTER') and (mdsid_info.mdsid_factory_info[i][3][4] == 'compressor'):
+                        mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	"""
+
+        # factory - INVERTER (blower)
+	
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+                if (mdsid_info.mdsid_factory_info[i][1] == 'INVERTER') and (mdsid_info.mdsid_factory_info[i][3][4] == 'blower'):
+                        mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	
+
+        # factory - INVERTER (fan)
+	"""
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+		if (mdsid_info.mdsid_factory_info[i][1] == 'INVERTER') and (mdsid_info.mdsid_factory_info[i][3][4] == 'fan'):
+                        mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	"""
+
+        # factory - INVERTER (pump)
+	"""	
+        for i in range(len(mdsid_info.mdsid_factory_info)):
+                if (mdsid_info.mdsid_factory_info[i][1] == 'INVERTER') and (mdsid_info.mdsid_factory_info[i][3][4] == 'pump'):
+                        mdsid_list_full.append(mdsid_info.mdsid_factory_info[i][0])
+	"""
+
+
+	#factory
+#       	mdsid_list_full = ['00-250007109', '00-250007136', '00-250007145', '00-250059962', '00-250059977', '00-250102627']
+
+	#factory - MOTOR
+#	mdsid_list_full = ['00-50151143003408', '00-50151143003422', '00-50151143004065']
+#     	mdsid_list_full = ['01221251195-0001']
+#	print "(main) mdsid_list_full: %s / len(mdsid_list_full): %s" %(mdsid_list_full, len(mdsid_list_full))
+
+	# valid mdsid
+	mdsid_list = verifyMDSID(datelist, mdsid_list_full)
+	print "(main) valid mdsid_list: %s / len(mdsid_list): %s / total len(mdsid_list_full): %s" %(mdsid_list, len(mdsid_list), len(mdsid_list_full))
+
+#	print "(main) mdsid_list_full: %s, len(mlf): %s, mdsid_list: %s, len(ml): %s" %(mdsid_list_full, len(mdsid_list_full), mdsid_list, len(mdsid_list))
+
+#	print "(main) mdsid_list_full: %s, len(mlf): %s, mdsid_list: %s, len(ml): %s" %(mdsid_list_full, len(mdsid_list_full), mdsid_list, len(mdsid_list))
+	normlist_save = []
+
+# 데이터가 온전한 마트 id가 있는지 없는지에 따라 처리한다.
+
+        if len(mdsid_list) == 0:
+                print "valid mdsid list is empty"
+	else:
+		for i in range(len(mdsid_list)): # number of mdsid list
+			mxval = 0.0
+			normlist[:] = []
+			tmp_tsdb[:] = []
+			retTL[:] = []
+			tmp_tsdb_fill[:] = []
+			retTSDB[:] = []
+#			print "(main) mdsid: %s" %mdsid_list[i]
+			for j in range(len(datelist)): # number of date
+				#retTSDB [[1st day 0..24][2nd day 0..24]], starttiem, endtime, mdsid
+				tmp_tsdb = readTSDB(datelist[j][0], datelist[j][1], mdsid_list[i])
+#				print "(main) tmp_tsdb: %s" %tmp_tsdb
+
+				retTL = timeList(datelist[j][0], datelist[j][1], 60) # unix time
+#				print "unix time: %s" %retTL
+
+				tmp_tsdb_fill = fillData(retTL, tmp_tsdb) # fill missing data
+#				print "tmp_tsdb_fill: %s" %tmp_tsdb_fill
+%3CmxGraphModel%3E%3Croot%3E%3CmxCell%20id%3D%220%22%2F%3E%3CmxCell%20id%3D%221%22%20parent%3D%220%22%2F%3E%3CmxCell%20id%3D%222%22%20value%3D%22%22%20style%3D%22endArrow%3Dblock%3BstrokeColor%3D%23000000%3BstrokeWidth%3D1%3Bhtml%3D1%3BlabelBackgroundColor%3Dnone%3BfontColor%3D%23000000%3B%22%20edge%3D%221%22%20parent%3D%221%22%3E%3CmxGeometry%20x%3D%22120%22%20y%3D%22150%22%20as%3D%22geometry%22%3E%3CmxPoint%20x%3D%22120%22%20y%3D%22150%22%20as%3D%22sourcePoint%22%2F%3E%3CmxPoint%20x%3D%22120%22%20y%3D%22185%22%20as%3D%22targetPoint%22%2F%3E%3C%2FmxGeometry%3E%3C%2FmxCell%3E%3C%2Froot%3E%3C%2FmxGraphModel%3E
+				# maximum value
+                       		mxval = calMAX(tmp_tsdb_fill, mxval)
+                       		retTSDB.append(tmp_tsdb_fill)
+#			print "(main) retTSDB: %s" %retTSDB
+
+
+#  해당 마트 id가 mdsid_info.mdsid_factory_info에 있다면 인덱스를 반환, 해당 인덱스의 마트가 MOTOR나 INVERTER라면 max값을 바꿔 넣는다.
+#			print "(main) mdsid: %s, find mxval: %s" %(mdsid_list[i], mxval)			
+			ixvol = findVOLUME(mdsid_list[i], mdsid_info.mdsid_factory_info) # factory motor
+			if mdsid_info.mdsid_factory_info[ixvol][1] == 'MOTOR' or mdsid_info.mdsid_factory_info[ixvol][1] == 'INVERTER': 
+				mxval = mdsid_info.mdsid_factory_info[ixvol][3][3]
+#                        	print "(main) item: %s / volume: %s" %(mdsid_info.mdsid_factory_info[ixvol][0], mxval)
+
+
+#			print "(main) retTSDB: %s" %retTSDB
+#			print "(main) mdsid: %s, mxval: %s" %(mdsid_list[i], mxval)
+			normlist = calNORM(retTSDB, mxval) # normalization per mdsid
+#			print "(main) mdsid: %s, mxval: %s, normlist: %s" %(mdsid_list[i], mxval, normlist)
+		# normlist_save[0]=[[id.1, date1], [id.1, date2]], normlist_save[0][0][0]=id.1
+			normlist_save.append(saveNORMLIST(mdsid_list[i], datelist, normlist)) #maek normlist
+	
+#	print "(main) normlist save: %s" %normlist_save
+			avglist.append(calAVG(normlist)) # average per mdsid
+#      		print "(main) average list per MDSID: %s" %avglist
+
+        	c_avglist = calClAVG(avglist) # average per class
+		print "(main) total average class: %s" %c_avglist
+		
+        	# metric name, class name
+        	tsdbinfo = ['tmp.ee.f.inverter.blower.total.201602132340.90days', 'factory', sttime, entime, 'INVERTER.blower']
+        	postData(c_avglist, tsdbinfo) # tsdb save
+		
+
+        	# capacity utilization
+		culist = calCU(c_avglist)
+		print "(main) total capacity utilization: %s" %culist
+		
+        	tsdbinfo = ['tmp.ee.f.inverter.blower.total.201602132340.90daysCU', 'factory', sttime, entime, 'INVERTER.blower']
+        	postData(culist, tsdbinfo) # tsdb save
+		
+	
+	# holiday retHOLY[0] / working day retHOLY[1]
+	# mdsid, sttime, entime, 24hrs
+#	print "(main) normlist_save: %s" %normlist_save
+	# mart
+##+	retHolyList = calHOLIDAY(sttime, entime, normlist_save, mdsid_info.mdsid_mart_info)
+
+		# factory
+		retHolyList = calHOLIDAY(sttime, entime, normlist_save, mdsid_info.mdsid_factory_info)
+#	print "(main) retHolyList[0]: %s \n retHolyList[1]: %s" %(retHolyList[0], retHolyList[1])
+
+		# holiday
+		retHolidayList = arrangeList(retHolyList[0], len(mdsid_list)) # foratted holiday
+		rhlc_avgs = calAVGS(retHolidayList, len(mdsid_list))
+		c_rhlc_avgs = calClAVG(rhlc_avgs)
+		print "(main) holiday avgerage: %s" %c_rhlc_avgs	
+		
+        	tsdbinfo = ['tmp.ee.f.inverter.blower.holiday.201602132340.90days', 'factory', sttime, entime, 'INVERTER.blower']
+        	postData(c_rhlc_avgs, tsdbinfo) # tsdb save
+		
+
+        	# holiday capacity utilization
+        	culist_holy = calCU(c_rhlc_avgs)
+        	print "(main) holiday capacity utilization: %s" %culist_holy
+		
+        	tsdbinfo = ['tmp.ee.f.inverter.blower.holiday.201602132340.90daysCU', 'factory', sttime, entime, 'INVERTER.blower']
+        	postData(culist_holy, tsdbinfo) # tsdb save
+		
+
+		# working
+		retWorkingList = arrangeList(retHolyList[1], len(mdsid_list)) # formatted working day
+#	print "(main) reWorkingList: %s" %retWorkingList
+        	rwlc_avgs = calAVGS(retWorkingList, len(mdsid_list))
+        	c_rwlc_avgs = calClAVG(rwlc_avgs)
+#        print "(main) rwlc_avgs: %s \n c_rwlc_avgs: %s" %(rwlc_avgs, c_rwlc_avgs)
+        	print "(main) c_rwlc_avgs: %s" %c_rwlc_avgs
+		
+        	tsdbinfo = ['tmp.ee.f.inverter.blower.working.201602132340.90days', 'factory', sttime, entime, 'INVERTER.blower']
+        	postData(c_rwlc_avgs, tsdbinfo) # tsdb save
+		
+
+        	# working capacity utilization
+        	culist_working = calCU(c_rwlc_avgs)
+        	print "(main) working day capacity utilization: %s" %culist_working
+		
+        	tsdbinfo = ['tmp.ee.f.inverter.blower.working.201602132340.90daysCU', 'factory', sttime, entime, 'INVERTER.blower']
+        	postData(culist_working, tsdbinfo) # tsdb save
+		
